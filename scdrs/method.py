@@ -7,7 +7,8 @@ import anndata
 from typing import List, Dict, Tuple
 from statsmodels.stats.multitest import multipletests
 import scdrs
-from scipy.sparse import csc_matrix
+import gc
+
 
 def score_cell(
     data,
@@ -95,8 +96,6 @@ def score_cell(
 
     np.random.seed(random_seed)
     adata = data.copy() if copy else data
-    if sp.sparse.issparse(adata.X) and not isinstance(adata.X, sp.sparse.csc_matrix):
-        adata.X = sp.sparse.csc_matrix(adata.X)
     n_cell, n_gene = adata.shape
 
     # Check preprocessing information
@@ -169,18 +168,59 @@ def score_cell(
         df_gene, gene_list, gene_weight, ctrl_match_key, n_ctrl, n_genebin, random_seed
     )
     # Compute raw scores
-    v_raw_score, v_score_weight = _compute_raw_score(
-        adata, gene_list, gene_weight, weight_opt
-    )
-
-    mat_ctrl_raw_score = np.zeros([n_cell, n_ctrl])
-    mat_ctrl_weight = np.zeros([len(gene_list), n_ctrl])
-    for i_ctrl in tqdm(range(n_ctrl), desc="Computing control scores"):
-        v_ctrl_raw_score, v_ctrl_weight = _compute_raw_score(
-            adata, dic_ctrl_list[i_ctrl], dic_ctrl_weight[i_ctrl], weight_opt
+#    if adata.isbacked:
+#        block_size = int(2e9/adata.shape[1])
+#        if n_cell <= block_size:
+#            temp = adata.to_memory()
+#            v_raw_score, v_score_weight = _compute_raw_score(
+#                temp, gene_list, gene_weight, weight_opt
+#            )
+#
+#            mat_ctrl_raw_score = np.zeros([n_cell, n_ctrl])
+#            mat_ctrl_weight = np.zeros([len(gene_list), n_ctrl])
+#            for i_ctrl in tqdm(range(n_ctrl), desc="Computing control scores"):
+#                v_ctrl_raw_score, v_ctrl_weight = _compute_raw_score(
+#                    temp, dic_ctrl_list[i_ctrl], dic_ctrl_weight[i_ctrl], weight_opt
+#                )
+#                mat_ctrl_raw_score[:, i_ctrl] = v_ctrl_raw_score
+#                mat_ctrl_weight[:, i_ctrl] = v_ctrl_weight
+#            del temp; gc.collect()
+#        else:
+#            v_raw_score = np.zeros(n_cell)
+#            mat_ctrl_raw_score = np.zeros([n_cell, n_ctrl])
+#            mat_ctrl_weight = np.zeros([len(gene_list), n_ctrl])
+#            for i in range(0, n_cell, block_size):
+#                cmin = i; cmax = min(i+block_size, n_cell)
+#                print(f'Scoring cells {cmin} - {cmax}')
+#                temp = adata[cmin:cmax,:].to_memory()
+#                v_raw_score[cmin:cmax], v_score_weight = _compute_raw_score(
+#                    temp, gene_list, gene_weight, weight_opt
+#                ) # v_score_weight does not depend on the expression matrix, so is constant throughout
+#
+#                for i_ctrl in tqdm(range(n_ctrl), desc="Computing control scores"):
+#                    v_ctrl_raw_score, v_ctrl_weight = _compute_raw_score(
+#                        temp, dic_ctrl_list[i_ctrl], dic_ctrl_weight[i_ctrl], weight_opt
+#                    )
+#                    mat_ctrl_raw_score[cmin:cmax, i_ctrl] = v_ctrl_raw_score
+#                    mat_ctrl_weight[:, i_ctrl] = v_ctrl_weight
+#                del temp; gc.collect()
+#
+#    else:
+    if adata.isbacked:
+        adata = adata.to_memory() # un-links previous adata object
+    if not adata.isbacked:
+        v_raw_score, v_score_weight = _compute_raw_score(
+            adata, gene_list, gene_weight, weight_opt
         )
-        mat_ctrl_raw_score[:, i_ctrl] = v_ctrl_raw_score
-        mat_ctrl_weight[:, i_ctrl] = v_ctrl_weight
+
+        mat_ctrl_raw_score = np.zeros([n_cell, n_ctrl])
+        mat_ctrl_weight = np.zeros([len(gene_list), n_ctrl])
+        for i_ctrl in tqdm(range(n_ctrl), desc="Computing control scores"):
+            v_ctrl_raw_score, v_ctrl_weight = _compute_raw_score(
+                adata, dic_ctrl_list[i_ctrl], dic_ctrl_weight[i_ctrl], weight_opt
+            )
+            mat_ctrl_raw_score[:, i_ctrl] = v_ctrl_raw_score
+            mat_ctrl_weight[:, i_ctrl] = v_ctrl_weight
 
     # Compute normalized scores
     v_var_ratio_c2t = np.ones(n_ctrl)
@@ -386,18 +426,14 @@ def _compute_raw_score(adata, gene_list, gene_weight, weight_opt):
 
         # Compute v_raw_score = transformed_X @ v_score_weight
         # where transformed_X = adata.X + cov_mat @ cov_beta + gene_mean
-        gene_idx = adata.var_names.get_indexer(gene_list)
-        gene_idx = gene_idx[gene_idx >= 0]
         v_raw_score = (
-            adata.X[:,gene_idx].dot(v_score_weight)
+            adata[:, gene_list].X.dot(v_score_weight)
             + cov_mat @ (cov_beta @ v_score_weight)
             + gene_mean @ v_score_weight
         ).flatten()
     else:
         # Normal mode
-        gene_idx = adata.var_names.get_indexer(gene_list)
-        gene_idx = gene_idx[gene_idx >= 0]
-        v_raw_score = adata.X[:,gene_idx].dot(v_score_weight).reshape([-1])
+        v_raw_score = adata[:, gene_list].X.dot(v_score_weight).reshape([-1])
 
     return v_raw_score, v_score_weight
 
@@ -439,13 +475,11 @@ def _compute_overdispersion_score(adata, gene_list, gene_weight):
     # Mode check
     flag_sparse = adata.uns["SCDRS_PARAM"]["FLAG_SPARSE"]
     flag_cov = adata.uns["SCDRS_PARAM"]["FLAG_COV"]
-    gene_idx = adata.var_names.get_indexer(gene_list)
-    gene_idx = gene_idx[gene_idx >= 0]
     if flag_sparse and flag_cov:
         cell_list = list(adata.obs_names)
         cov_list = list(adata.uns["SCDRS_PARAM"]["COV_MAT"])
         mat_X = (
-            adata.X[:,gene_idx].toarray()
+            adata[:, gene_list].X.toarray()
             + adata.uns["SCDRS_PARAM"]["COV_MAT"]
             .loc[cell_list, cov_list]
             .values.dot(
@@ -454,7 +488,7 @@ def _compute_overdispersion_score(adata, gene_list, gene_weight):
             + adata.uns["SCDRS_PARAM"]["COV_GENE_MEAN"].loc[gene_list].values
         )
     else:
-        mat_X = adata.X[:,gene_idx]
+        mat_X = adata[:, gene_list].X
 
     v_mean = adata.uns["SCDRS_PARAM"]["GENE_STATS"].loc[gene_list, "mean"].values
     v_var_tech = (
@@ -809,7 +843,7 @@ def downstream_group_analysis(
 
         # Heterogeneity
         df_rls = test_gearysc(
-            adata[cell_list], df_reg.loc[cell_list, :], groupby=group_col
+            adata, df_reg.loc[cell_list, :], groupby=group_col, subset = cell_list # manual edit
         )
         for ct in group_list:
             mc_p, mc_z = df_rls.loc[ct, ["pval", "zsc"]]
@@ -916,6 +950,7 @@ def test_gearysc(
     adata: anndata.AnnData,
     df_full_score: pd.DataFrame,
     groupby: str,
+    subset: list = [],
     opt="control_distribution_match",
 ) -> pd.DataFrame:
     """
@@ -935,6 +970,8 @@ def test_gearysc(
             - "control_distribution_match":
                 The distribution of the scores of the control scores is similar to
                 the distribution of the scores of the disease scores.
+    MANUALLY EDITED
+    subset: a list of cells to include in adata
 
     Returns
     -------
@@ -946,22 +983,23 @@ def test_gearysc(
         - `ctrl_mean`: mean of the control scores
         - `ctrl_sd`: standard deviation of the control scores
     """
+    if len(subset) == 0: subset = adata.obs_names.tolist()
     assert np.all(
-        df_full_score.index == adata.obs_names
+        df_full_score.index == adata[subset,:].obs_names
     ), "adata.obs_names must match df_full_score.index"
     norm_score = df_full_score["norm_score"]
     ctrl_norm_score = df_full_score[
         [col for col in df_full_score.columns if col.startswith(f"ctrl_norm_score_")]
     ]
     n_null = ctrl_norm_score.shape[1]
-    df_meta = adata.obs.copy()
+    df_meta = adata[subset,:].obs.copy()
     df_stats = pd.DataFrame(
         index=df_meta[groupby].unique(),
         columns=["trait"] + [f"null_{i_null}" for i_null in range(n_null)],
         data=np.nan,
     )
 
-    for group, df_group in df_meta.groupby(groupby):
+    for group, df_group in tqdm(df_meta.groupby(groupby)):
         group_index = df_group.index
         group_adata = adata[group_index]
         group_norm_score = norm_score[group_index]
@@ -976,19 +1014,24 @@ def test_gearysc(
                 Use order in `v` to match the distribution of `ref`
                 """
                 return np.sort(ref)[rankdata(v, method="ordinal") - 1]
-
-            df_stats.loc[group, "trait"] = gearys_c(
-                group_adata, group_norm_score.values
-            )
-
-            for i_null in range(n_null):
-                df_stats.loc[group, f"null_{i_null}"] = gearys_c(
-                    group_adata,
-                    distribution_match(
-                        group_ctrl_norm_score.iloc[:, i_null].values,
-                        ref=group_norm_score,
-                    ),
-                )
+            
+            tmpdf = pd.DataFrame({'trait':group_norm_score.values} + {f'null_{i_null}': distribution_match(
+                group_ctrl_norm_score.iloc[:,i_null].values, ref = group_norm_score) for i_null in range(n_null)})
+            df_stats.loc[group, ['trait'] + [f'null_{i_null}' for i_null in range(n_null)]] = gearys_c(group_adata, tmpdf.values)
+            del tmpdf
+# MANUAL EDIT to vectorise gearys_c calculation
+#            df_stats.loc[group, "trait"] = gearys_c(
+#                group_adata, group_norm_score.values
+#            )
+#
+#            for i_null in range(n_null):
+#                df_stats.loc[group, f"null_{i_null}"] = gearys_c(
+#                    group_adata,
+#                    distribution_match(
+#                        group_ctrl_norm_score.iloc[:, i_null].values,
+#                        ref=group_norm_score,
+#                    ),
+#                )
 
         elif opt == "permutation":
             # permutation
@@ -1054,18 +1097,18 @@ def gearys_c(adata, vals):
 
     Returns
     -------
-    C : float
+    C : float/home/yh464/miniconda3/envs/gentoolspy/lib/python3.13/site-packages/scdrs/method.py
         Geary's C statistics.
     """
     graph = adata.obsp["connectivities"]
     assert graph.shape[0] == graph.shape[1]
     graph_data = graph.data.astype(np.float64, copy=False)
     assert graph.shape[0] == vals.shape[0]
-    assert np.ndim(vals) == 1
+    vals = vals.reshape([vals.shape[0], int(vals.size / vals.shape[0])])
 
     W = graph_data.sum()
     N = len(graph.indptr) - 1
-    vals_bar = vals.mean()
+    vals_bar = vals.mean(axis = 0)
     vals = vals.astype(np.float64)
 
     # numerators
@@ -1075,11 +1118,11 @@ def gearys_c(adata, vals):
         # indices of corresponding neighbors
         i_indices = graph.indices[s]
         # corresponding connecting weights
-        i_data = graph_data[s]
-        total += np.sum(i_data * ((vals[i] - vals[i_indices]) ** 2))
+        i_data = graph_data[s].reshape([-1,1])
+        total += np.sum(i_data * ((vals[i,:] - vals[i_indices,:]) ** 2), axis = 0)
 
     numer = (N - 1) * total
-    denom = 2 * W * ((vals - vals_bar) ** 2).sum()
+    denom = 2 * W * ((vals - vals_bar) ** 2).sum(axis = 0)
     C = numer / denom
 
     return C
