@@ -168,44 +168,6 @@ def score_cell(
         df_gene, gene_list, gene_weight, ctrl_match_key, n_ctrl, n_genebin, random_seed
     )
     # Compute raw scores
-#    if adata.isbacked:
-#        block_size = int(2e9/adata.shape[1])
-#        if n_cell <= block_size:
-#            temp = adata.to_memory()
-#            v_raw_score, v_score_weight = _compute_raw_score(
-#                temp, gene_list, gene_weight, weight_opt
-#            )
-#
-#            mat_ctrl_raw_score = np.zeros([n_cell, n_ctrl])
-#            mat_ctrl_weight = np.zeros([len(gene_list), n_ctrl])
-#            for i_ctrl in tqdm(range(n_ctrl), desc="Computing control scores"):
-#                v_ctrl_raw_score, v_ctrl_weight = _compute_raw_score(
-#                    temp, dic_ctrl_list[i_ctrl], dic_ctrl_weight[i_ctrl], weight_opt
-#                )
-#                mat_ctrl_raw_score[:, i_ctrl] = v_ctrl_raw_score
-#                mat_ctrl_weight[:, i_ctrl] = v_ctrl_weight
-#            del temp; gc.collect()
-#        else:
-#            v_raw_score = np.zeros(n_cell)
-#            mat_ctrl_raw_score = np.zeros([n_cell, n_ctrl])
-#            mat_ctrl_weight = np.zeros([len(gene_list), n_ctrl])
-#            for i in range(0, n_cell, block_size):
-#                cmin = i; cmax = min(i+block_size, n_cell)
-#                print(f'Scoring cells {cmin} - {cmax}')
-#                temp = adata[cmin:cmax,:].to_memory()
-#                v_raw_score[cmin:cmax], v_score_weight = _compute_raw_score(
-#                    temp, gene_list, gene_weight, weight_opt
-#                ) # v_score_weight does not depend on the expression matrix, so is constant throughout
-#
-#                for i_ctrl in tqdm(range(n_ctrl), desc="Computing control scores"):
-#                    v_ctrl_raw_score, v_ctrl_weight = _compute_raw_score(
-#                        temp, dic_ctrl_list[i_ctrl], dic_ctrl_weight[i_ctrl], weight_opt
-#                    )
-#                    mat_ctrl_raw_score[cmin:cmax, i_ctrl] = v_ctrl_raw_score
-#                    mat_ctrl_weight[:, i_ctrl] = v_ctrl_weight
-#                del temp; gc.collect()
-#
-#    else:
     if adata.isbacked:
         adata = adata.to_memory() # un-links previous adata object
     if not adata.isbacked:
@@ -1015,23 +977,10 @@ def test_gearysc(
                 """
                 return np.sort(ref)[rankdata(v, method="ordinal") - 1]
             
-            tmpdf = pd.DataFrame({'trait':group_norm_score.values} + {f'null_{i_null}': distribution_match(
+            tmpdf = pd.DataFrame({'trait':group_norm_score.values} | {f'null_{i_null}': distribution_match(
                 group_ctrl_norm_score.iloc[:,i_null].values, ref = group_norm_score) for i_null in range(n_null)})
             df_stats.loc[group, ['trait'] + [f'null_{i_null}' for i_null in range(n_null)]] = gearys_c(group_adata, tmpdf.values)
             del tmpdf
-# MANUAL EDIT to vectorise gearys_c calculation
-#            df_stats.loc[group, "trait"] = gearys_c(
-#                group_adata, group_norm_score.values
-#            )
-#
-#            for i_null in range(n_null):
-#                df_stats.loc[group, f"null_{i_null}"] = gearys_c(
-#                    group_adata,
-#                    distribution_match(
-#                        group_ctrl_norm_score.iloc[:, i_null].values,
-#                        ref=group_norm_score,
-#                    ),
-#                )
 
         elif opt == "permutation":
             # permutation
